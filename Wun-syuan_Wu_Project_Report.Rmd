@@ -1,0 +1,735 @@
+---
+title: "STA207 Project: Covid-19 Analysis"
+author: "Wun-Syuan Wu"
+date: "March 2022"
+output: html_document
+fontsize: 12pt
+---
+
+# I. Abstract
+The goal of this report is to examine relationship between total cases in different countries in 2022 and information of vaccinations. Poisson regression , negative binomial regression and multiple linear regression were three used to achieve this goal.
+
+# II. Introduction
+
+## 2.1 Background
+The Covid-19 pandemic has been happening from the very beginning to present days for almost two years, a variety ways that people try to use to deal with this SARS-Cov-2 virus have also been created and implemented. For example, different vaccines were invented by bio-tech companies and were injected in almost every country. There are at least 35 approved covid vaccines all around the world, and at least 197 countries used those approval vaccines[1]. This quantity implies that getting vaccines could be one of the most effective way to prevent the spread of this unpleasant virus. Also, some policies for preventing people from getting infected were also built and executed[2].\
+In addition, a great amount of article discussing about vaccination and restrictions. Some stated that the increase of vaccination rate can effectively reduce the severe cases[3] [4], some stated that vaccination might not be effective against some variant of covid virus[5] [6]. Still as people know, lots of countries still insist on giving mask mandate in order to prevent another outbreak of covid.\
+
+Therefore, in this project we would like to focus on the impact of vaccinations on the amount of cases happened in 2022 as to Feb.10 (from 2022-01-01 to 2022-02-10), which is exactly the time for omicron variant became severe all around the world.
+The question of interests therefore are whether the cumulative cases in the past 41 days of each country can be affected by (1) fully vaccinated rate (2) the time vaccine has been first implemented in a country (3) the number of vaccine types a country used and (4) restrictions(safety guidance) in each country.
+
+## 2.2 Data  
+
+I obtained data from three resources. The first one is the required WHO covid dataset, it countains 182490 observations with 8 variables including countries, new cases, new death, cumulative cases and cumulative deaths. The second one is also from WHO, this data set is vaccine data. It has 228 observations with 14 variables. The 228 observations are coming from the amount of countries in the WHO, and variables such as first vaccine date of a country and the amount of vaccine type a country use are used in this report. In order to answer questions we're interested in, the data from WHO is not enough. We also obtained data about the restriction index from the website Our World in Data[7].
+
+After cleaning and merging data from three sources, the final data set we obtained contains 164 observations with no NA value, and each one represent a country in WHO. The features including:
+
+- `country`: Country names
+- `ISO`: the iso number for each country 
+- `region`: the corresponding areas divided by WHO
+- `oneplus_dose_per100` : the amount of people vaccinated at least on dose during the past few month
+- `full_dose_per100` : the amount of people that were fully vaccinated during the past few month
+- `first_vaccine_date` : the amount of days a country start to vaccinate from now
+- `vaccines_types_use` : the amount of different types of vaccines that a country use, I divided the type by the method of the vaccine, and the total is five types.
+- column 9-36 : whether a country use the type of vaccine, if yes(1), no(0)
+- `total_new_cases` : total new cases detected within the past one month
+- `total_new_deaths` :  total new deaths reported within the past one month
+- `stringency_index` : index of a country restriction level
+- `population` : the population in a country
+
+The variables will be mainly used in modeling are as following:
+
+- Response variable: `Cumulative_cases` from WHO covid data.
+- Explanatory variable 1: `PERSONS_FULLY_VACCINATED_PER100` from WHO vaccination data.
+- Explanatory variable 2: `number_vaccine_type_use` from WHO's vaccination data.
+- Explanatory variable 3: `FIRST_VACCINE_DATE` from WHO's vaccination data. 
+- Explanatory variable 4: `stringency_index` from Our World in Data's data.
+
+To be more clear about the division of vaccine types, I introduce more information here. In WHO covid data, the type data is obtained by counting the total different product of several different brands. Therefore, there are 28 different names of vaccines, we can see from the figure below. For example, United states used “Janssen - Ad26.COV 2-S”, “Moderna - Spikevax” and “Pfizer BioNTech - Comirnaty” vaccination, with different name of the vaccination, they are counting as a type. However, I did not divide the type by using vaccine names, since some of the vaccine with different name is with identical formula of vaccine, for instance, AstraZeneca - AZD1222 is the same product as Astrazeneca - Vaxzevria and SII - Covishield.\
+Instead, I used the different methods of exposure use in a vaccine to be a distinct count. “All vaccines work by exposing the human body to particles or molecules that trigger an immune response,the key difference is the method of exposure used.” said by Rachel McArthur from Healthcare IT News[8]. Based on several articles[9] [10], I divided them into five different methods: 
+
+(1) inactivated virus vaccine, e.g. Sinopharm, Sinovac vaccines. \
+(2) viral vector vaccine, e.g.Oxford-AstraZeneca, Sputnik V \
+(3) mRNA, e.g. Pfizer-BioNTech, Moderna\
+(4) DNA vaccine, e.g.ZyCoV-D.\
+(5) protein subunit vaccine, e.g.Novavax.
+
+```{r include=FALSE}
+library(MASS) #use to conduct negative binomial analysis
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(stringi)
+library(pscl)
+library(lmtest)
+library(ggplot2)
+library(sandwich)
+library(tibble)
+```
+
+```{r include=FALSE}
+daily <- read.csv("WHO-COVID-19-global-data.csv")
+vaccine <- read.csv("vaccination-data.csv")
+test <- read.csv("owid-covid-data.csv")
+```
+
+```{r include=FALSE}
+str(daily)
+```
+
+```{r include=FALSE}
+#change Date_reported column to date data
+daily <- daily %>% mutate(Date_reported = ymd(Date_reported))
+#change qualitative data into factor
+daily <- daily %>% mutate_if(is.character, as.factor)
+str(daily)
+```
+
+```{r include=FALSE}
+#examine numbers of missing values in each column
+sapply(daily, function(x) sum(is.na(x)))
+```
+
+```{r include=FALSE}
+#filter only same country name with vaccine
+same_country <- unique(vaccine$COUNTRY)[(unique(vaccine$COUNTRY) %in% unique(daily$Country))]
+daily_need <- daily %>%
+  filter(Country %in% same_country) %>%
+  select(c(Date_reported,Country, WHO_region,New_cases,New_deaths)) %>%
+  mutate(year = year(Date_reported), 
+         month = month(Date_reported), 
+         mday = mday(Date_reported)) %>%
+  filter(year == '2022') 
+```
+
+```{r include=FALSE}
+feb_day_count <- daily_need %>%
+  group_by(Country,month) %>%
+  summarize(count_mday = n())
+```
+
+```{r include=FALSE}
+daily_need <- daily_need %>%
+  filter(Date_reported >= '2022-01-01' & Date_reported <= '2022-02-09')
+```
+
+```{r include=FALSE}
+daily_final <- daily_need %>%
+  group_by(Country) %>%
+  summarise(total_new_cases = sum(New_cases),
+            total_new_deaths = sum(New_deaths))
+```
+
+```{r include=FALSE}
+daily_final
+```
+
+```{r include=FALSE}
+str(vaccine)
+```
+
+```{r echo=FALSE}
+#concatenate every row value of VACCINES_USED together
+vac_use_vec <- sapply(vaccine$VACCINES_USED, paste)
+#split it by "," and make it become a list
+vac_use_list <- str_split(vac_use_vec,",")
+#turn it back to a character vector
+vac_use_vec <- unlist(vac_use_list)
+#trim each character
+vac_use_vec <- sapply(vac_use_vec,str_trim)
+#find unique vaccines
+vaccine_type <- stri_unique(vac_use_vec)
+vaccine_type
+```
+```{r include=FALSE}
+#make a table contains binary values of each vaccine type for each country
+vaccine_type_binary <- data.frame(matrix(ncol = length(vaccine_type), nrow = nrow(vaccine)))
+for (i in 1:length(vaccine_type)) {
+  vaccine_type_binary[,i] <- as.integer(grepl(vaccine_type[i],vaccine$VACCINES_USED))
+}
+#change the columns name as same as vaccine_type
+vaccine_type_name <- vaccine_type
+vaccine_type_name <- str_replace_all(vaccine_type_name," - ","_")
+vaccine_type_name <- str_replace_all(vaccine_type_name," ","_")
+vaccine_type_name <- str_replace_all(vaccine_type_name,"-","_")
+colnames(vaccine_type_binary) <- vaccine_type_name
+vaccine_type_name
+```
+
+```{r include=FALSE}
+vaccine_type_binary <- vaccine_type_binary %>%
+  #remove one unnecessary row
+  select(-c(12)) %>%
+  #calculate the amount of certain type of vaccine a country has used
+  mutate(inactivated_virus = 
+           Beijing_CNBG_BBIBP_CorV + 
+           Sinovac_CoronaVac + 
+           Bharat_Covaxin +
+           IMB_Covidful +
+           Wuhan_CNBG_Inactivated + 
+           Shifa_COVIran_Barakat + 
+           RIBSP_QazVac + 
+           Julphar_Hayat_Vax + 
+           Turkovac,
+         viral_vector = 
+           Janssen_Ad26.COV_2_S + 
+           SII_Covishield + 
+           AstraZeneca_Vaxzevria + 
+           Gamaleya_Gam_Covid_Vac + 
+           CanSino_Convidecia + 
+           Gamaleya_Sputnik_Light + 
+           Gamaleya_Sputnik_V + 
+           AstraZeneca_AZD1222 + 
+           Shenzhen_LV_SMENP_DC,
+         mRNA = 
+           Pfizer_BioNTech_Comirnaty + 
+           Moderna_Spikevax + 
+           Moderna_mRNA_1273,
+         subunit = 
+           Novavax_Covavax + 
+           Anhui_ZL_Recombinant + 
+           CIGB_CIGB_66 + 
+           Finlay_Soberana_Plus + 
+           Finlay_Soberana_02 + 
+           SRCVB_EpiVacCorona,
+         DNA = Zydus_ZyCov_D) %>%
+  #if the country has use as least one of that type, code it 1, else 0
+  mutate(inactivated_virus = ifelse(inactivated_virus != 0, 1, 0),
+         viral_vector = ifelse(viral_vector != 0, 1, 0),
+         mRNA = ifelse(mRNA != 0, 1, 0),
+         subunit = ifelse(subunit != 0, 1, 0),
+         DNA = ifelse(subunit != 0, 1, 0)) %>%
+  mutate(vaccine_type_used = inactivated_virus + viral_vector + mRNA + subunit + DNA)
+  
+```
+
+```{r include=FALSE}
+#join back with vaccine data
+vaccine <- cbind(vaccine, vaccine_type_binary)
+```
+
+```{r include=FALSE}
+#change DATE_UPDATED column to date data
+#change qualitative data into factors
+#change binary columns and NUMBER_VACCINES_TYPES_USED into factor
+vaccine <- vaccine %>% 
+  mutate(
+    DATE_UPDATED = ymd(DATE_UPDATED), 
+    FIRST_VACCINE_DATE = ymd(FIRST_VACCINE_DATE)) %>%
+  mutate_if(is.character, as.factor) %>%
+  mutate_at(tail(colnames(vaccine), n = 29), factor)
+```
+
+```{r include=FALSE}
+vaccine_final <- vaccine %>% select(! c('DATA_SOURCE', 'TOTAL_VACCINATIONS','PERSONS_VACCINATED_1PLUS_DOSE', 'TOTAL_VACCINATIONS_PER100', 'PERSONS_VACCINATED_1PLUS_DOSE','PERSONS_FULLY_VACCINATED'))
+```
+
+```{r include=FALSE}
+#convert one iso_code to a correct one
+test <- test %>% mutate(iso_code = replace(iso_code, iso_code == "OWID_KOS", "XKX"))
+#find the same iso between vaccine_final and test
+same_iso <- unique(vaccine_final$ISO3)[(unique(vaccine_final$ISO3) %in% unique(test$iso_code))]
+```
+
+```{r include=FALSE}
+#select target columns and rows
+test_need <- test %>% 
+  select(c("iso_code","location", "date", "stringency_index", "population")) %>%
+  filter(iso_code %in% same_iso)
+```
+
+```{r include=FALSE}
+str(test_need)
+#change data type
+test_need <- test_need %>% 
+  mutate(date = ymd(date)) %>%
+  mutate_if(is.character, as.factor)
+```
+
+```{r include=FALSE}
+test_need <- test_need %>%
+  mutate(year = year(date), 
+         month = month(date)) %>%
+  filter(year == '2022') 
+```
+
+```{r include=FALSE}
+feb_day_count_test <- test_need %>%
+  group_by(iso_code,month) %>%
+  summarize(count_mday = n())
+```
+
+```{r include=FALSE}
+test_need <- test_need %>% 
+  filter(date >= "2022-01-01" & date <= "2022-02-09")
+```
+
+```{r include=FALSE}
+test_need <- na.omit(test_need)
+test_final <-  test_need %>%
+  group_by(iso_code) %>%
+  summarise(stringency_index = mean(stringency_index),
+            population = max(population))
+```
+
+```{r include=FALSE}
+vaccine_and_daily <- inner_join(vaccine_final,daily_final, by = c("COUNTRY" = "Country"))
+covid <- inner_join(vaccine_and_daily, test_final, by = c("ISO3" = "iso_code"))
+```
+
+```{r include=FALSE}
+#covid <- na.omit(covid)
+sapply(covid, function(x) sum(is.na(x)))
+covid <- na.omit(covid)
+```
+
+
+```{r include=FALSE}
+covid <- covid %>%
+  mutate(total_new_cases_per_million = round((total_new_cases/population)*1000000),
+         total_new_deaths_per_million = round((total_new_deaths/population)*1000000),
+         FIRST_VACCINE_DATE = as.Date('2022-02-09') - FIRST_VACCINE_DATE,
+         FIRST_VACCINE_DATE = as.numeric(FIRST_VACCINE_DATE)
+  )
+
+#%>% mutate(FIRST_VACCINE_DATE = as.factor(FIRST_VACCINE_DATE))
+#case_when(
+           #FIRST_VACCINE_DATE <= as.Date('2020-09-30') ~ 0,
+           #as.Date('2020-06-30') < FIRST_VACCINE_DATE & FIRST_VACCINE_DATE < as.Date('2021-01-01') ~ 1,
+           #as.Date('2020-12-31') < FIRST_VACCINE_DATE & FIRST_VACCINE_DATE < as.Date('2021-04-01') ~ 2,
+           #as.Date('2021-03-31') < FIRST_VACCINE_DATE & FIRST_VACCINE_DATE < as.Date('2021-07-01') ~ 3,
+           #as.Date('2021-06-30') < FIRST_VACCINE_DATE & FIRST_VACCINE_DATE < as.Date('2021-10-01') ~ 4,
+           #as.Date('2021-09-30') < FIRST_VACCINE_DATE & FIRST_VACCINE_DATE < as.Date('2022-01-01') ~ 5)
+```
+
+```{r include=FALSE}
+covid_trim <- covid %>%
+  select(c("COUNTRY", "ISO3", "WHO_REGION", "PERSONS_VACCINATED_1PLUS_DOSE_PER100", "PERSONS_FULLY_VACCINATED_PER100", "FIRST_VACCINE_DATE","vaccine_type_used", "total_new_cases_per_million", "total_new_deaths_per_million", "stringency_index" ))  %>% mutate(vaccine_type_used = droplevels(vaccine_type_used))
+```
+
+The final dataset being used in this project:
+```{r echo = FALSE}
+tibble(head(covid_trim,6))
+```
+
+# III. Analysis
+
+## 3.1 Descriptive Analysis
+
+Before proceeding the modeling and predictive analysis, we examined our data by several figures.\
+Some of the countries has relatively high fully vaccinated rate, in which 92% of the population had already finished two doses. The average rate of it is 46%, meaning that almost half of the world are fully vaccinated, it might have a positive impact on the recent positive cases, which is exactly what we're going to examine later. Moreover, average amount of date from now that a country started vaccination is 359 days, almost a year. And most of the country implemented at least two types of vaccine.
+
+```{r echo = FALSE}
+summary(covid_trim)
+```
+
+Based on the below histogram and boxplots, we could tell that substantial variation appears on **total_new_cases_per_million** and the distribution is right-skewed. This indicates that in the following analysis, transformation and the dispered of the variance might need to be considered. In addition, **PERSONS_VACCINATED_1PLUS_DOSE_PER100** and **PERSONS_FULLY_VACCINATED_PER100** have really similar pattern in the shape of the distribution, and be highly correlated as well(correlation equals to 0.98). One of the reason of this situation might because of the overlapping calculation on person who got vaccinated. They might lead to multicollinearity in the following analysis, we decided to not consider **PERSONS_VACCINATED_1PLUS_DOSE_PER100** in the model. There is no obvious relationship between **total_new_cases_per_million** and **stringency_index** based on following graph. But there is a slightly positive linear relationship with between **total_new_cases_per_million** and **PERSONS_FULLY_VACCINATED_PER100**. We will discuss it in the later paragragh. 
+
+```{r echo = FALSE}
+#overview of a dependent variable
+par(mfrow = c(2,3))
+p1 <- ggplot(covid_trim, aes(x=total_new_cases_per_million)) + geom_histogram(color="black", fill="lightblue") + theme(axis.title.x = element_text(size = 10))
+p2 <- ggplot(covid_trim, aes(x=PERSONS_VACCINATED_1PLUS_DOSE_PER100)) + geom_histogram(color="black", fill="orchid4") + theme(axis.title.x = element_text(size = 10))
+p3 <- ggplot(covid_trim, aes(x=PERSONS_FULLY_VACCINATED_PER100)) + geom_histogram(color="black", fill="orchid4") + theme(axis.title.x = element_text(size = 10))
+p4 <- ggplot(covid_trim, aes(x=FIRST_VACCINE_DATE)) + geom_histogram(color="black", fill="white") + theme(axis.title.x = element_text(size = 10))
+p5 <- ggplot(covid_trim, aes(x=stringency_index)) + geom_histogram(color="black", fill="white") + theme(axis.title.x = element_text(size = 10))
+library(ggpubr)
+ggarrange(p1,p2,p3,p4,p5,
+          ncol = 3, nrow = 2)
+```
+
+```{r include = FALSE}
+par(mfrow = c(2,3))
+boxplot(covid_trim$total_new_cases_per_million, main="total_new_cases_per_million", type="l")
+boxplot(covid_trim$PERSONS_VACCINATED_1PLUS_DOSE_PER100, main="PERSONS_VACCINATED_1PLUS_DOSE_PER100", type="l")
+boxplot(covid_trim$PERSONS_FULLY_VACCINATED_PER100, main="PERSONS_FULLY_VACCINATED_PER100", type="l")
+boxplot(covid_trim$FIRST_VACCINE_DATE, main="FIRST_VACCINE_DATE", type="l")
+boxplot(covid_trim$stringency_index, main="stringency_index", type="l")
+```
+```{r echo = FALSE}
+panel.cor <- function(x, y) {
+    par(usr = c(0, 1, 0, 1))
+    r <- round(cor(x, y, use = "complete.obs"), 2)
+    txt <- paste0("R = ", r)
+    cex.cor <- 0.8/strwidth(txt)
+    text(0.5, 0.5, txt, cex = cex.cor * (abs(r) + 1))
+}
+
+pairs(covid_trim, lower.panel = panel.cor)
+```
+
+Besides, the table below shows the average total new cases in the past 38 days by the number of vaccine type used in a country. It suggests that over-dispersion is present, because the conditional variances are far larger than the conditional mean. Theses difference indicates that with the count data as our response variable, instead of using poisson regression model, negative binomial regression model might be more appropriate.
+
+```{r echo = FALSE}
+#To see if vaccine_type_used is a good explanatory varaible
+#display the summary statistics by vaccine_type_used
+with(covid_trim, tapply(total_new_cases_per_million, vaccine_type_used, function(x) {
+  sprintf("M (SD) = %1.2f (%1.2f)", mean(x), sd(x))
+}))
+```
+
+Besides the graphs above, we would like to understand more relationship about our response variable and explanatory variables. The following three graphs are for this purpose.\
+To begin with, it shows only 2 type of vaccine being used by a country are more common and have larger variance. Even though we have less information of the other number of vaccine type used, it seems to have a negative relationship of the **vaccine_type_used** and **total_new_cases_per_million**. As for the relationship between total cases and the **first vaccination start date** and the relationship between **stringency index** are not obvious. Thus, we further created main effect plot and histogram. The main effect plot proves that there exist different effect by different number of vaccine has used.
+
+```{r echo = FALSE}
+#pairwise bivariate displays of dependent variables against each of the regressor
+formula <- total_new_cases_per_million ~ FIRST_VACCINE_DATE + vaccine_type_used + PERSONS_FULLY_VACCINATED_PER100 + stringency_index
+par(mfrow = c(2,2))
+plot(formula, data = covid_trim)
+```
+```{r echo = FALSE}
+library(gplots)
+#show comparison with average wage by occupations 
+plotmeans(total_new_cases_per_million~vaccine_type_used,data=covid_trim, ylab = 'average total new cases', main = 'Main Effect Plot')
+```
+
+```{r}
+#ggplot(covid_trim, aes(total_new_cases_per_million, fill = vaccine_type_used)) +
+  #geom_histogram(position="dodge")
+```
+
+```{r echo = FALSE}
+ggplot(covid_trim, aes(total_new_cases_per_million, fill = vaccine_type_used)) + 
+  geom_histogram() + 
+  facet_grid(vaccine_type_used ~ ., margins = TRUE, scales = "free")
+```
+
+## 3.2 Inferential Analysis
+
+In this section, we proposed to use three approaches to conduct inferential analysis. Since our response variable is about count data, the first two approaches, we chose (1) Poisson regression, (2) Negative binomial regression. There are still several statistical models for count data, such as zero-inflated regression, quassi-poisson regression. The reason we did not choose them is because, there is only one zero value in our response value and according to the above analysis, we acquired that there is overdispersion in the data, and not underdispersion.\
+The approach we chose (3) multiple linear regression, which is an more easily understanding and interpreting model and is suitable for both qualitative and quantitative independent variables.
+
+### 3.2.1 Poisson Regression
+
+Our first attempt for model fitting is Poisson Regression. It is an approach especially for count data with non-negative integers which could fix the problem that the fitted line in an ordinary least square model could yield negative values. Poisson regression model is a generalized linear model form of regression which is also known as log-linear model. That is, the response variable is usually distributed by the poisson distribution, and it use a logarithmic function as the link between the response variable and regressors.\
+
+The probability mass function of poisson distribution is 
+$$f(k,\lambda) = P(X = k) = \frac{\lambda^k \exp(-\lambda)}{k!}$$\
+,where $k = 0,1,2,...$ is the total number of occurrences(events) and $\lambda$ is the average rate of occurrence for the event being measured $(\lambda = k/n)$, in addition the mean and variance of the random variable $X$ are both equal to $\lambda$. $(E(X) = Var(X) = \lambda)$\
+
+The equation of poisson regression is 
+$$ln(Y) = \beta_0 + \beta_1X_1+\beta_2X_2+...+\beta_kX_k$$
+, where $Y$ is the response variable, $X_i$ are regressors, $\beta_i$ are regression coefficients and $k$ is the number of regressors.\
+Often, it can also be written as $$Y = \exp(\beta_0 + \beta_1X_1+\beta_2X_2+...+\beta_kX_k)$$ after taking exponential.\
+
+Poisson regression assumes that (1) the response variables is poisson distributed, (2) the log of its expected value can be explained by a linear combination of covariates, (3) the variance is equal to the mean, and (4) observations must be independent to each other.\
+
+```{r include = FALSE}
+dispersion_test <- function(x) 
+{
+  res <- 1-2 * abs((1 - pchisq((sum((x - mean(x))^2)/mean(x)), length(x) - 1))-0.5)
+
+  cat("Dispersion test of count data:\n",
+      length(x), " data points.\n",
+      "Mean: ",mean(x),"\n",
+      "Variance: ",var(x),"\n",
+      "Probability of being drawn from Poisson distribution: ", 
+      round(res, 3),"\n", sep = "")
+
+  invisible(res)
+}
+```
+
+```{r echo = FALSE}
+dispersion_test(covid_trim$total_new_cases_per_million)
+```
+Here, we can see that the variance are far larger than the mean, which violates the assumption. But in order to obtain more detail, we still fitted the model.\
+To capture the relationship between the number of total cases from 1/1/22 to 2/10/22 and explanatory variables, we first fitted  an additive poisson regression model with 4 explanatory variables: **FIRST_VACCINE_DATE**, **vaccine_type_used**, **PERSONS_FULLY_VACCINATED_PER100**, and **stringency_index**.\
+
+```{r echo = FALSE}
+model_pois <- glm(total_new_cases_per_million ~ FIRST_VACCINE_DATE + vaccine_type_used + PERSONS_FULLY_VACCINATED_PER100 + stringency_index, data = covid_trim, family = "poisson")
+summary(model_pois)
+```
+The results shows that every explanatory variables are statistically significant. However, when we examine the assumption of this model, the issue of overdispersion occurs which leads to poor hold of assumptions. The overdispersion is examined by `dispersiontest()` sysntax from **AER** packages with null hypothesis \
+$H_0:$ true dispersion is equal to 1 and alternative hypothesis\
+$H_a:$ true dispersion is greater than 1\
+We could also intuitively examine it by comparing the conditional mean and variance. Take *vaccine_type_used* for example, the variance of only one type used is 27613, almost three times larger than the mean, and the other variance also presents the issue of over-dispersed variance.
+
+```{r include = FALSE}
+library(AER)
+dispersiontest(model_pois)
+```
+
+```{r include = FALSE}
+with(covid_trim, tapply(total_new_cases_per_million, vaccine_type_used, function(x) {
+    sprintf("M (SD) = %1.2f (%1.2f)", mean(x), sd(x))
+}))
+```
+
+```{r include = FALSE}
+#goodness-of-fit
+1 - pchisq(summary(model_pois)$deviance, summary(model_pois)$df.residual)
+```
+
+### 3.2.2 Negative Binomial Regression
+
+Overdispersion appears in our data might because of the underlying clustering in the sample. To put it another way, each observation represent to one country in our covid data, however, countries in one continent might have similar pattern or clustering in the data. 
+
+Due to the overdispersion in the poisson regression which will cause to underestimated standard error and inflated type I error, negative binomial regression seemed to be a better approach here.\
+
+Negative binomial regression is a generalization of poisson regression whose variance is assumed to be $Var(Y) = \mu(1+\frac{\mu}{r})$, where $k$ is the shape parameter. \
+
+The probability mass function of negative binomial is 
+$$f(k,r,p) = P(X=k) = {k+r-1\choose r-1}(1-p)^kp^r$$
+, where there are $k+r-1$ samples, $r$ successes, $k$ failures and $p$ is the probability of success.\ 
+
+It can also be written as 
+$$P(X=k) = \frac{\Gamma(r+k)}{k!\Gamma(r)}(\frac{r}{r+\mu})^r(\frac{\mu}{r+\mu})^k$$ 
+,where $k = 0,1,2,...$ Because its mean is $\mu = \frac{pr}{1-p}$, and then we can derive it to get $p = \frac{r}{\mu+r}$.\
+
+The equation for binomial regression is as same as poisson distribution. 
+$$ln(Y) = \beta_0 + \beta_1X_1+\beta_2X_2+...+\beta_kX_k$$
+```{r echo = FALSE}
+#preliminary model of negative binomial regression
+model_nb0 <- glm.nb(total_new_cases_per_million ~ FIRST_VACCINE_DATE + vaccine_type_used + PERSONS_FULLY_VACCINATED_PER100 + stringency_index, data = covid_trim)
+summary(model_nb0)
+```
+```{r include = FALSE}
+#goodness-of-fit
+1 - pchisq(summary(model_nb0)$deviance, summary(model_nb0)$df.residual)
+```
+
+```{r include = FALSE}
+round(coef(model_nb0),4)
+```
+First,we created a preliminary model, in which we put 4 explanatory variables we're interested in. In this model, the quantitative variable **FIRST_VACCINE_DATE** and **stringency_index** seem to not be significant, while **PERSONS_FULLY_VACCINATED_PER100** has a coefficient 0.0607, which is showed statistically significant base on the result.\
+
+The coefficient of this variable means that with one unit increase in **PERSONS_FULLY_VACCINATED_PER100**, there will be an 0.0607 increase for the expected log count of total new covid cases. This might seem to conflict to the common sense that the more people got fully vaccinated, the less positive cases would happen. However, in the previous EDA section, it indicated from the scatter plot of  **PERSONS_FULLY_VACCINATED_PER100** and **total_new_cases_per_million** that they don't have a negative linear relationship but have a slightly positive relationship.\
+
+As to the **vaccine_type_used**, those indicator variables show the difference in log count of total new covid cases between that group and the reference group (only use one type). Here, **vaccine_type_used2** is 0.8179 more than the log count for **vaccine_type_use** = 1, **vaccine_type_used3** is 1.0113 more than that, and **vaccine_type_used4** and **vaccine_type_used5** is 1.2577 and 1.7561 less than the log count for reference group respectively.\
+
+In order to determine if the **vaccine_type_used** is overall statistically significant, and if we should leave out **FIRST_VACCINE_DATE** and **stringency_index**, we created other models without these targeting variables and compared them.
+
+```{r echo = FALSE}
+#test whether to remove FIRST_VACCINE_DATE and stringency_index
+model_nb1 <- update(model_nb0, . ~ . - FIRST_VACCINE_DATE - stringency_index)
+anova(model_nb0,model_nb1)
+```
+We conducted deviance test $$-2\ell(\hat{\beta}^{(0)})-(-2\ell(\hat{\beta}))$$
+, where $-2\ell(\hat{\beta}^{(0)})$ is the deviance of the reduced model and $-2\ell(\hat{\beta})$ is the deviance of the full model).\
+Our null hypotheses is \
+$H_0: \beta_{FIRST.VACCINE.DATE} = \beta_{stringency.index}=0$ and $H_1:$not all of them are equal to 0.\
+Also, the test statistic has a chi-squared distribution with $k+1-r$ degree of freedom.\
+
+The result shows a failure to reject null hypothesis. It means that comparing to the full model(**model_nb0**), **FIRST_VACCINE_DATE** and **stringency_index** are not statistically significant, thus they are able to be removed.
+
+```{r echo = FALSE}
+#test whether to leave vaccine_type_used
+model_nb2 <- update(model_nb1, . ~ . - vaccine_type_used)
+anova(model_nb1,model_nb2)
+```
+After removing **FIRST_VACCINE_DATE** and **stringency_index**, we compared this new model with the one without **vaccine_type_used**. We conducted the deviance test again, with null hypotheses \
+$H_0:$ all $\beta_{vaccine.type.used} = 0$ and $H_1:$ not all $\beta_{vaccine.type.used} = 0$.\
+And the 4 degrees of freedom chi-squared test indicates that **vaccine_type_used** is statistically significant.\
+
+Thus, our final negative binomial regression model equation is:
+$$
+ln(\widehat{total.new.cases.per.million}_i) = \hat{\beta_0} + \hat{\beta_1}I(vaccine.type.used_i = 2) + \\ \hat{\beta_2}I(vaccine.type.used_i = 3) +  \hat{\beta_3}I(vaccine.type.used_i = 4) + \\ \hat{\beta_4}I(vaccine.type.used_i = 5) +  \hat{\beta_5}X_{PERSONS.FULLY.VACCINATED.PER100_i}
+$$
+Without log scale, the equivalent model equation is:
+$$
+\widehat{total.new.cases.per.million}_i = exp(\hat{\beta_0} + \hat{\beta_1}I(vaccine.type.used_i = 2) +\\ \hat{\beta_2}I(vaccine.type.used_i = 3) + \hat{\beta_3}I(vaccine.type.used_i = 4) + \\ \hat{\beta_4}I(vaccine.type.used_i = 5) + \hat{\beta_5}X_{PERSONS.FULLY.VACCINATED.PER100_i})
+$$
+
+```{r echo = FALSE}
+library(jtools)
+summ(model_nb1, exp = T)
+```
+From the result, it shows that with one exponential unit increase in **PERSONS_FULLY_VACCINATED_PER100**, there would be 1.06 increase in **total_cases_per_million**. And exp(**vaccine_type_used2**) is 2.47 more than the count for **vaccine_type_use** = 1, exp(**vaccine_type_used3**) is 3.02 more than it, and exp(**vaccine_type_used4**) and exp(**vaccine_type_used5**) is 0.31 and 0.23 less than the count for reference group respectively. In addition, the Pseudo-R² (Cragg-Uhler) = 0.53 and AIC = 3483.80.
+
+### 3.2.3 Measure the goodness-of-fit
+
+We compared the goodness-of-fit of two models by likelihood ratio test in order to understand whether negative binomial model we created here is better than the poisson regression model. The two models are both with the same variables from the same dataset.
+```{r include = FALSE}
+model_pois1 <- glm(total_new_cases_per_million ~ vaccine_type_used + PERSONS_FULLY_VACCINATED_PER100, data = covid_trim, family = "poisson")
+summary(model_pois1)
+```
+
+```{r include=FALSE}
+pchisq(2*(logLik(model_nb1)-logLik(model_pois1)), df = 1, lower.tail = FALSE)
+qchisq(0.05,1,lower.tail = FALSE)
+```
+The log-likelihood value of negative binomial model is -1734.902 and that of poisson regression model is -2136764, thus two times of their difference is 4270034, far larger than the critical value $\chi^2_{(1)} = 3.841459$ under significance level 0.05. Thus, it implies that negative binomial model has a better goodness-of-fit than the poisson model.\
+However, when we test the goodness-of-fit of negative binomial itself, it shows an evidence of lack-of-fit, which means we still have a lot to improve on the features of the model in the future. 
+
+```{r include = FALSE}
+#goodness-of-fit
+1 - pchisq(summary(model_nb1)$deviance, summary(model_nb1)$df.residual)
+```
+
+```{r echo = FALSE}
+AIC(model_pois1,model_nb2)
+```
+
+### 3.3.4 Multiple Linear Regression
+
+Our third attempt is to use multiple linear regression to explore the relationship between **total_new_cases_per_million** and the targeting 4 variables.
+The equation of multiple linear regression model is 
+$$Y = \beta_0 +\beta_1X1 +...+\beta_kXk + \epsilon$$
+, where $Y$ is response variable, $\beta$ is regression coefficients, $X$ is independent variable and $k$ is the number of independent variables, $\epsilon$ is the error term.\
+In the previous descriptive analysis section, the distribution of the response variable **total_new_cases_per_million** looks right-skewed, therefore, we performed box-cox transformation to see if any transformation on Y is necessary. Based on the result, performing log transformation on Y would be appropriate.
+Then the equation would turn to be $ln(Y) = \beta_0 +\beta_1X1 +...+\beta_kXk + \epsilon$\
+Furthermore, based on the main plot of **vaccine_type_used**, one-way anova is also conducted to check whether the effect exist in different groups.
+
+```{r include = FALSE}
+covid_trim_remove0 <- covid_trim %>%
+  filter(total_new_cases_per_million != 0)
+
+model_lm_pre <- lm(total_new_cases_per_million ~ FIRST_VACCINE_DATE + vaccine_type_used + PERSONS_FULLY_VACCINATED_PER100 + stringency_index, data = covid_trim_remove0)
+```
+
+```{r include = FALSE}
+plot(model_lm_pre)
+```
+```{r echo = FALSE}
+boxcox(model_lm_pre)
+```
+
+The one-way ANOVA model we used is:
+$$Y_{ij}=\mu+\alpha_i+\epsilon_{ij}, i = 1,..,5,\ j = 1,...,n_i$$	
+,where $Y_{ij}$ is observation of total new cases from different number of vaccine type a country has used, $\mu$ is overall average total new cases, $\alpha_i$ the effect on response variable by the number of vaccine type and $\epsilon_{ij}$ is i.i.d to $N(0,\sigma^2)$.\
+The assumption of normally distributed and constant variance of error term should be hold here.\
+
+And based on the ANOVA table, F test can be conducted to test whether there is any effect exist by different number of vaccine type a country has used.\
+It is conducted as following:\
+Null hypothesis: $H_0:\alpha_1=\alpha_2=\alpha_3=\alpha_4=\alpha_5$\
+Alternative hypothesis: $H_1:not\ all\ \alpha_i\ are\ the\ same.$\
+
+- critical value: $F(1-0.05, 5-1, 164-5)=F(0.95,4,159)=2.428522$
+- test statistic: $F^*=MSTR/MSE=5.722$
+- rejection region: the set of $(2.428522,+\infty)$
+
+Because the test statistics is in the rejection region, we can reject the null under significance level 0.05.
+
+```{r echo = FALSE}
+fit_aov <- aov(log(total_new_cases_per_million+1) ~ vaccine_type_used, data = covid_trim)
+summary(fit_aov)
+```
+
+The result of the first additive model shows that **FIRST_VACCINE_DATE** and **stringency_index** are not statistically significant, and with the F test, the results are proved. Furthermore, the estimate shows that with one unit increase by **PERSONS_FULLY_VACCINATED_PER100**, there would be 0.055064 increase on the logarithmic value of **total_new_cases_per_million**. Which is similar to the result of negative binomial regression model.
+
+```{r echo = FALSE}
+model_lm0 <- lm(log(total_new_cases_per_million+1) ~ FIRST_VACCINE_DATE + vaccine_type_used + PERSONS_FULLY_VACCINATED_PER100 + stringency_index, data = covid_trim)
+summary(model_lm0)
+```
+
+```{r echo = FALSE}
+model_lm1 <- update(model_lm0, .~. - FIRST_VACCINE_DATE - stringency_index)
+#lm(total_new_cases_per_million ~ vaccine_type_used + PERSONS_FULLY_VACCINATED_PER100, data = covid_trim)
+#summary(model_lm1)
+anova(model_lm1,model_lm0)
+```
+```{r include = FALSE}
+summary(model_lm1)
+```
+
+F test is again used to conduct the hypothesis testing to test whether **vaccine_type_used** should be leave in the model.\
+Null hypothesis: $H_0: \beta_{vaccine.type.used} = 0$ \
+Alternative hypothesis: $H_1: \beta_{vaccine\ type\ used} \neq 0$\
+We rejected H0 under the significance $\alpha = 0.05$. \
+It means that **vaccine_type_used** can be keep in the model. \
+Thus, our final model is the one with two independent variables: **vaccine_type_used** and **PERSONS_FULLY_VACCINATED_PER100**.\
+
+The final fitted model is then:
+$$log(Y) = 5.4009 + 0.7402*I(vaccine\ type\ used = 2) + \\0.4875*I(vaccine\ type\ used = 3) - 1.8320*I(vaccine\ type\ used = 4) \\- 2.4248*I(vaccine\ type\ used = 5) + 0.0637*X_{PERSONS\ FULLY\ VACCINATED\ PER100}$$
+
+```{r echo = FALSE}
+model_lm2 <- update(model_lm1, .~. - vaccine_type_used)
+anova(model_lm2,model_lm1)
+```
+
+### 3.3.5 Model Selection
+
+To select a better model in our three approaches, we chose to use $AIC=nlog(\frac{SSE}{n})+2k$ as our comparing method. The reason that I only chose AIC because none of the models I selected from are too complex, with a maximum of three variables. It is in the sense that choosing BIC which penalizes the model more for its complexity is not necessary in this case, on the other hand, more consideration should be given to the model performance. The result shows that the multiple linear regression has the smallest AIC compare to the other models.Thus, we chose to use the multiple regression model to perform the following predictive analysis.
+```{r echo = FALSE}
+model_select <- data.frame(Poisson = AIC(model_pois1), Negative_Binomial = AIC(model_nb1), OLS = AIC(model_lm1))
+model_select
+```
+
+### 3.3.6 Predictive Analysis
+
+```{r echo = FALSE}
+covid_trim_predict <- covid_trim %>%
+  select(c("total_new_cases_per_million","vaccine_type_used", "PERSONS_FULLY_VACCINATED_PER100")) %>%
+  mutate(fitted = fitted.values(model_lm1))
+
+confit <- predict(model_lm1, interval = "confidence")
+covid_trim_predict <- cbind(covid_trim_predict,confit)
+```
+
+```{r }
+ggplot(covid_trim_predict, aes(x = PERSONS_FULLY_VACCINATED_PER100, y = log(total_new_cases_per_million), color = vaccine_type_used) ) +
+     geom_point() +
+     geom_ribbon(aes(ymin = lwr, ymax = upr, fill = vaccine_type_used, color = NULL), alpha = .15) +
+     geom_line(aes(y = fitted), size = 1)
+```
+After fitting the model, we can see that with different amount of vaccine type used, total cases performed differently. That is, two and three vaccine types used shows more total cases, and four and five vaccine types used show less cases. More the overall trend are the same, with positive relationship between fully vaccinated rate and total cases. 
+
+### 3.3.7 Sensitivity Analysis
+
+#### 3.3.7.1 Model Diagnostic
+
+The residual and fitted plot shows that there is no obvious pattern for the residual. It indicates that the linearity and constant variance of residual are hold well for our model. However, in normal Q-Q plot, it is seen that more probability mass on the left tail and a little bit less probability mass on the right tail compares to a normal distribution. But it could because of the several countries (ex.China) has less total cases than most of the countries and are treated as outliers.
+
+```{r echo = FALSE}
+par(mfrow=c(2,2))
+plot(model_lm2)
+```
+
+#### 3.3.7.1 Other
+
+In inferential analysis section, the multiple regression model with log transformation perform better than the poisson and negative binomial. I would like to see what will happen if we do not consider the log transformation on response variable.
+Based on the result, the $R^2_{Adj}$ decreases from 0.4967 to 0.429, and the AIC of this model becomes 3922.026, which is similar to the one of negative binomial regression but less goodness-of-fit.
+However, the interpretation of this model could be easier than the one with logrithmic. For example, it shows that the **vaccine_type_use** = 4 has 54141 total new cases less than the reference **vaccine_type_use** = 1.
+```{r echo = FALSE}
+model_lm_without_log <- lm(total_new_cases_per_million ~ vaccine_type_used + PERSONS_FULLY_VACCINATED_PER100, data = covid_trim)
+summary(model_lm_without_log)
+```
+```{r echo = FALSE} 
+model_compare <- data.frame(Poisson = AIC(model_pois1), Negative_Binomial = AIC(model_nb1), OLS_Log = AIC(model_lm1), OLS_withoutLog = AIC(model_lm_without_log))
+model_compare
+```
+
+### 3.3.8 Causual Inference
+In a causal analysis, the independent variables are taken as the cause of the response variable. Which is in our cases, the different amount of vaccine type used and fully vaccination rate could lead to different amount of total covid cases. However, because our data is totally observational and non-experimental, it may not be appropriate to performed causual inference on our data.
+
+# VI. Conclusion
+
+Again, our question of interest is whether the cumulative cases in the past 41 days of each country can be affected by (1) fully vaccinated rate (2) the time vaccine has been implemented (3) the number of vaccine types a country used and (4) restrictions(safety guidance) in each country.\
+From our three approaches for exploring the relationship, the result from all three models concluded that the start of the vaccine date and stringency index have no statistical evidence to be able to explain the total cases in the past 41 days. However, fully vaccinated rate and the number of vaccine types a country has delivered have impact on the total new cases. The more people in one country who got fully vaccinated, tend to have more new positive cases. To be honest, the result is conflicted to what we thought in the first place. Nonetheless, this phenomenon might happen because of the density and population which we didn't consider in our model.\
+Besides, the more number of vaccine type a country used tend to have less cases in the past few weeks. This is quite an interesting result. Even though the power of explanation of our model might not be as good, the result leads to even more question of interests about this globally pandemic COVID-19. \
+In the further research, if we have the data about how many proportion of each type of vaccine delivered to people, we might be able to acquire more hinder relationship between different types of vaccines and positive cases.
+
+
+# Acknowledgement {-}
+
+1.Approved Vaccines (https://covid19.trackvaccines.org/vaccines/approved/) \
+2.Policy Responses to the Coronavirus Pandemic (https://ourworldindata.org/policy-responses-covid) \
+3.Six months of COVID vaccines: what 1.7 billion doses have taught scientists (https://www.nature.com/articles/d41586-021-01505-x) \
+4.COVID-19 Vaccines vs Variants—Determining How Much Immunity Is Enough (https://jamanetwork.com/journals/jama/fullarticle/2777785) \
+5. Study shows dramatic decline in effectiveness of all three COVID-19 vaccines over time (https://www.latimes.com/science/story/2021-11-04/study-shows-dramatic-decline-in-effectiveness-of-covid-19-vaccines) \
+6. Omicron likely to weaken COVID vaccine protection (https://www.nature.com/articles/d41586-021-03672-3) \
+7. Our world in data (https://ourworldindata.org/coronavirus-testing#the-positive-rate-a-crucial-metric-for-understanding-the-pandemic) \
+8. The four types of COVID-19 vaccine – a snapshot (https://www.healthcareitnews.com/news/emea/four-types-covid-19-vaccine-snapshot) \
+9. Types of covid-19 vaccines (https://covid19.trackvaccines.org/vaccine-types/) \ 
+10.The different types of COVID-19 vaccines (https://www.who.int/news-room/feature-stories/detail/the-race-for-a-covid-19-vaccine-explained) \
+11.Poisson Regression (https://ncss-wpengine.netdna-ssl.com/wp-content/themes/ncss/pdf/Procedures/NCSS/Poisson_Regression.pdf) \
+12.NEGATIVE BINOMIAL REGRESSION https://stats.oarc.ucla.edu/stata/dae/negative-binomial-regression/#:~:text=The%20form%20of%20the%20model,3)%20%2B%20b3math  \
+13.Negative_binomial_distribution (https://en.wikipedia.org/wiki/Negative_binomial_distribution) \
+14.Poisson_regression (https://en.wikipedia.org/wiki/Poisson_regression) \
+15 Plot-fitted-lines (https://aosmith.rbind.io/2018/11/16/plot-fitted-lines/)
+
+# Session information {-}
+```{r}
+sessionInfo()
+```
+
+## Code Appendix
+```{r code = readLines(knitr::purl("/Users/alliewu/Desktop/STA207/Covid Project/Wun-syuan_Wu_Project_Report.Rmd", documentation = 1)), echo = T, eval = F}
+```
+
+
+
+
+
