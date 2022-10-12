@@ -1,5 +1,4 @@
-# STA207 Final-Project
-# Covid-19 data analysis
+# Statistical Analysis on Covid-19 Vaccines and Positive 
 
 The goal of this project is to examine relationship between total positive cases in different countries in 2022 and information of vaccinations. Poisson regression , negative binomial regression and multiple linear regression were three approaches used to achieve this goal.
 
